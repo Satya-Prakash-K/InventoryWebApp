@@ -70,8 +70,8 @@ def _add_type_responsibility_columns(df):
         '1173': {'Type': 'FG', 'Responsibility': 'Marketing'},
         '': {'Type': 'FG', 'Responsibility': 'Service'}, 
         '1109': {'Type': 'RAD', 'Responsibility': 'RAD'},
-        '1193': {'Type': 'Engg', 'Responsibility': 'Engg'}, 
         '1192': {'Type': 'Engg', 'Responsibility': 'Engg'},
+        '1193': {'Type': 'Engg', 'Responsibility': 'Engg'}, 
     }
 
     def get_mapping(loc):
@@ -108,7 +108,7 @@ def upload():
         flash('No selected file', 'warning')
         return redirect(url_for('tool'))
     if file and allowed_file(file.filename):
-        filename = secure_filename(file.filename)
+        filename = secure_filename(file.filename) # type: ignore
         upload_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(upload_path)
 
@@ -257,6 +257,108 @@ def reset():
     session.clear()
     flash('Process has been reset.', 'info')
     return redirect(url_for('tool'))
+
+@app.route('/summary_comparator')
+def summary_comparator():
+    return render_template('summary_comparator.html')
+
+@app.route('/compare_summaries', methods=['POST'])
+def compare_summaries():
+    if 'file1' not in request.files or 'file2' not in request.files:
+        flash('Please select two files.', 'warning')
+        return redirect(url_for('summary_comparator'))
+
+    file1 = request.files['file1']
+    file2 = request.files['file2']
+
+    if file1.filename == '' or file2.filename == '':
+        flash('Please select two files.', 'warning')
+        return redirect(url_for('summary_comparator'))
+
+    if file1 and allowed_file(file1.filename) and file2 and allowed_file(file2.filename):
+        try:
+            def process_summary(df, date):
+                df = df.iloc[:-1, :]
+                df = df.rename(columns={'Responsibility': 'Responsbilty', 'Grand Total': 'Total',
+                                        'Age< 150d': '< 150 Days', 'Age >= 150d': '>= 150 Days'})
+                df_long = pd.melt(df, id_vars=['Type', 'Responsbilty'],
+                                  value_vars=['Total', '< 150 Days', '>= 150 Days'],
+                                  var_name='Metric', value_name=date)
+                return df_long
+
+            def format_value(value):
+                if pd.isna(value):
+                    return ""
+                if abs(value) >= 10000000:
+                    return f'{value / 10000000:.2f} Cr'
+                elif abs(value) >= 100000:
+                    return f'{value / 100000:.2f} L'
+                else:
+                    return f'{value:,.2f}'
+
+            summary_1 = pd.read_excel(file1, sheet_name='Summary')
+            summary_2 = pd.read_excel(file2, sheet_name='Summary')
+
+            summary_1.columns = summary_1.columns.str.strip()
+            summary_2.columns = summary_2.columns.str.strip()
+
+            summary_1_processed = process_summary(summary_1, 'Date 1')
+            summary_2_processed = process_summary(summary_2, 'Date 2')
+
+            comparison_df = pd.merge(summary_1_processed, summary_2_processed, on=['Type', 'Responsbilty', 'Metric'], how='outer')
+
+            comparison_df['Value Change'] = comparison_df['Date 2'] - comparison_df['Date 1']
+            comparison_df['Change (%)'] = (comparison_df['Value Change'] / comparison_df['Date 1']).fillna(0)
+            
+            types = comparison_df['Type'].unique()
+            final_df = pd.DataFrame()
+
+            for t in types:
+                type_df = comparison_df[comparison_df['Type'] == t]
+                total_row = type_df[type_df['Metric'] == 'Total'].groupby('Type').agg({
+                    'Date 1': 'sum',
+                    'Date 2': 'sum'
+                }).reset_index()
+                total_row['Responsbilty'] = ''
+                total_row['Metric'] = 'Total'
+                age_buckets = type_df.groupby(['Type', 'Metric']).agg({
+                    'Date 1': 'sum',
+                    'Date 2': 'sum'
+                }).reset_index()
+                age_buckets = age_buckets[age_buckets['Metric'] != 'Total']
+                age_buckets['Responsbilty'] = ''
+
+                type_total_df = pd.concat([total_row, age_buckets], ignore_index=True)
+                type_total_df['Value Change'] = type_total_df['Date 2'] - type_total_df['Date 1']
+                type_total_df['Change (%)'] = (type_total_df['Value Change'] / type_total_df['Date 1']).fillna(0)
+                final_df = pd.concat([final_df, type_total_df], ignore_index=True)
+                respons_df = type_df[type_df['Metric'] == 'Total'].drop_duplicates(subset=['Type', 'Responsbilty'])
+                final_df = pd.concat([final_df, respons_df], ignore_index=True)
+
+            final_df = final_df[['Type', 'Responsbilty', 'Metric', 'Date 1', 'Date 2', 'Value Change', 'Change (%)']]
+            final_df = final_df.sort_values(by=['Type', 'Responsbilty']).reset_index(drop=True)
+
+            final_df['Date 1'] = final_df['Date 1'].apply(format_value)
+            final_df['Date 2'] = final_df['Date 2'].apply(format_value)
+            final_df['Value Change'] = final_df['Value Change'].apply(format_value)
+            final_df['Change (%)'] = final_df['Change (%)'].apply(lambda x: f'{x:.2%}')
+
+            timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            output_filename = f'comparison_summary_{timestamp}.xlsx'
+            output_path = os.path.join(app.config['DOWNLOAD_FOLDER'], output_filename)
+            
+            final_df.to_excel(output_path, index=False)
+
+            flash('Comparison successful!', 'success')
+            return render_template('summary_comparator.html', download_link=url_for('download_file', filename=output_filename))
+
+        except Exception as e:
+            flash(f"An error occurred: {e}", 'danger')
+            return redirect(url_for('summary_comparator'))
+
+    else:
+        flash('Invalid file type. Please upload Excel files only.', 'warning')
+        return redirect(url_for('summary_comparator'))
 
 if __name__ == "__main__":
     app.run(debug=True)
