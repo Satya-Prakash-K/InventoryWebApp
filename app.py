@@ -289,12 +289,8 @@ def compare_summaries():
             def format_value(value):
                 if pd.isna(value):
                     return ""
-                if abs(value) >= 10000000:
+                if abs(value) >= 10000000 or abs(value) >= 100000 or abs(value) < 100000:
                     return f'{value / 10000000:.2f} Cr'
-                elif abs(value) >= 100000:
-                    return f'{value / 100000:.2f} L'
-                else:
-                    return f'{value:,.2f}'
 
             summary_1 = pd.read_excel(file1, sheet_name='Summary')
             summary_2 = pd.read_excel(file2, sheet_name='Summary')
